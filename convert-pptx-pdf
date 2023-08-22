@@ -1,0 +1,8 @@
+#!/bin/bash
+
+pptx_file="$1"
+shift 1
+
+soffice --headless --convert-to pdf "$pptx_file" 
+rm "$pptx_file"
+

@@ -4,4 +4,4 @@ current_datetime=$(date '+%m-%d-%Y %H:%M:%S')
 
 
 cd ~/Documents/obsidian-sync
-git pull && git add * && git commit -a -m "homeBox($current_datetime)" && git push
+git pull && git add * && git commit -a -m "lap($current_datetime)" && git push
