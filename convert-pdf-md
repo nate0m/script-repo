@@ -1,0 +1,13 @@
+#!/bin/bash
+
+pdf_file="$1"
+shift 1
+
+filename="$(basename "$pdf_file" .pdf)"
+
+pdftotext "$pdf_file"
+
+pandoc -s ""$filename".txt" -o ""$filename".md"
+
+rm "$pdf_file"
+rm ""$filename".txt"
