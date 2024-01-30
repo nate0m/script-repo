@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Assuming your file is named urls.txt
+input_file="$1"
+
+# Check if the file exists
+if [ ! -f "$input_file" ]; then
+    echo "File not found: $input_file"
+    exit 1
+fi
+
+# Read the file line by line and process each URL
+while IFS= read -r url; do
+    # You can replace the following command with your specific command using $url
+    echo "Processing URL: $url"
+    yt-dl-mus -p $url
+done < "$input_file"
+
+
