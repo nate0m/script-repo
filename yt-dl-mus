@@ -12,7 +12,22 @@ if [ "$command_type" == "single" ]; then
     video_url="$1"
     output_dir="$2"
     shift 2
-    yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
+   # yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
+
+   yt-dlp -x --audio-format mp3 --embed-metadata --embed-thumbnail --convert-thumbnails jpg --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"" $video_url
+
+   for file in *\[*\]*.mp3; do
+  # 1. Use echo to feed the filename to sed.
+  # 2. sed substitutes the pattern (space + [content]) with nothing.
+  new_name=$(echo "$file" | sed 's/\s\[[^]]*\]//')
+
+  # 3. Rename the file only if the name has actually changed
+  if [ "$file" != "$new_name" ]; then
+    mv -v "$file" "$new_name"
+  fi
+done
+
+
 elif [ "$command_type" == "playlist" ]; then
     playlist_url="$1"
     output_dir="$2"
