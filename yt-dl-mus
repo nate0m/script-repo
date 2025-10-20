@@ -12,7 +12,7 @@ if [ "$command_type" == "single" ]; then
     video_url="$1"
     output_dir="$2"
     shift 2
-    yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "${output_dir}/%(title)s.%(ext)s" "$video_url" "$@"
+    yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
 elif [ "$command_type" == "playlist" ]; then
     playlist_url="$1"
     output_dir="$2"
