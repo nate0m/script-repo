@@ -27,7 +27,8 @@ if [ "$command_type" == "single" ]; then
     shift 2
 
 
-    yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
+    #yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
+    yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"" -o "%(title)s.%(ext)s" "$video_url" "$@"
 
 elif [ "$command_type" == "playlist" ]; then
 
