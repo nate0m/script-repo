@@ -12,7 +12,7 @@ if [ "$command_type" == "single" ]; then
     video_url="$1"
     output_dir="$2"
     shift 2
-    yt-dlp -x --audio-format mp3 --add-metadata --cookies --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
+    yt-dlp -x --audio-format mp3 --add-metadata --cookies "cookies.txt" --embed-thumbnail -o "%(title)s.%(ext)s" "$video_url" "$@"
 
     yt-dlp -x --audio-format mp3 --add-metadata --embed-thumbnail --embed-metadata --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"" -o "%(title)s.%(ext)s" "$video_url" "$@"
 
@@ -20,6 +20,6 @@ elif [ "$command_type" == "playlist" ]; then
     playlist_url="$1"
     output_dir="$2"
     shift 2
-     yt-dlp -x --audio-format mp3 --add-metadata --cookies --embed-thumbnail --parse-metadata "playlist_index:%(track_number)s" --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"" -o "%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s" --yes-playlist "$playlist_url" "$@"
+     yt-dlp -x --audio-format mp3 --add-metadata --cookies "cookies.txt" --embed-thumbnail --parse-metadata "playlist_index:%(track_number)s" --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"" -o "%(playlist)s/%(playlist_index)s - %(title)s.%(ext)s" --yes-playlist "$playlist_url" "$@"
 fi
 
