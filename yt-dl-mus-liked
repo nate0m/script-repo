@@ -1,0 +1,336 @@
+#!/bin/bash
+# ==============================================================================
+# yt-dl-mus-liked
+#
+# Periodically syncs/updates your "Liked Music" playlist from YouTube Music.
+# Based on yt-dl-mus.
+#
+# Default behavior:
+# - On first run: downloads all tracks and creates the download archive file.
+# - On subsequent runs: references the archive to avoid re-downloading songs
+#   that were previously downloaded.
+# ==============================================================================
+
+set -euo pipefail
+
+# Default settings
+DEFAULT_PLAYLIST="https://music.youtube.com/playlist?list=LM"
+PLAYLIST_URL="${PLAYLIST_URL:-$DEFAULT_PLAYLIST}"
+OUTPUT_DIR="${LIKED_MUSIC_DIR:-$HOME/Music/Liked Music}"
+ARCHIVE_FILE=""
+COOKIES_FILE="${COOKIES_FILE:-}"
+BROWSER="${BROWSER_NAME:-}"
+FAST_MODE=false
+RESET_ARCHIVE=false
+NOTIFY=true
+VERBOSE=false
+LOCK_FILE="/tmp/yt-dl-mus-liked.lock"
+EXTRA_ARGS=()
+
+show_help() {
+    cat << 'EOF'
+Usage: yt-dl-mus-liked [OPTIONS] [OUTPUT_DIR] [-- YT_DLP_OPTIONS...]
+
+Periodically sync and update your YouTube Music Liked playlist.
+
+Behavior:
+  First run:       Downloads all tracks and creates the download archive.
+  Subsequent runs: References the existing archive so only newly liked
+                   tracks are downloaded.
+
+Arguments:
+  OUTPUT_DIR                    Directory to store downloaded mp3s
+                                (default: $HOME/Music/Liked Music)
+
+Options:
+  -u, --url URL                 Playlist URL or ID (default: Liked Music 'LM')
+  -o, --output DIR              Output directory
+  -a, --archive FILE            Download archive file path
+                                (default: <output_dir>/.download_archive.txt)
+  --reset-archive               Delete existing archive and perform a fresh initial sync
+  -b, --browser NAME            Browser for cookies (zen, firefox, chrome, brave, etc.)
+  -c, --cookies FILE            Path to cookies.txt file
+  -f, --fast                    Fast sync: stop checking when reaching the first
+                                previously downloaded song (--break-on-existing)
+  -n, --dry-run, --simulate     Simulate sync without actually downloading files
+  -q, --quiet                   Suppress desktop notifications and non-essential logs
+  -v, --verbose                 Show verbose yt-dlp output
+  -h, --help                    Show this help message
+
+Examples:
+  # Initial sync / periodic update
+  yt-dl-mus-liked
+
+  # Fast periodic update (stops at first previously downloaded song)
+  yt-dl-mus-liked --fast
+
+  # Specify a custom folder
+  yt-dl-mus-liked "$HOME/Music/Favorites"
+
+  # Dry run test
+  yt-dl-mus-liked --dry-run
+EOF
+}
+
+# Parse command line options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -u|--url)
+            PLAYLIST_URL="$2"
+            shift 2
+            ;;
+        -o|--output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -a|--archive)
+            ARCHIVE_FILE="$2"
+            shift 2
+            ;;
+        --reset-archive)
+            RESET_ARCHIVE=true
+            shift
+            ;;
+        -b|--browser)
+            BROWSER="$2"
+            shift 2
+            ;;
+        -c|--cookies)
+            COOKIES_FILE="$2"
+            shift 2
+            ;;
+        -f|--fast)
+            FAST_MODE=true
+            shift
+            ;;
+        -n|--dry-run|--simulate)
+            EXTRA_ARGS+=(--simulate)
+            shift
+            ;;
+        -q|--quiet)
+            NOTIFY=false
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --)
+            shift
+            EXTRA_ARGS+=("$@")
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use -h or --help for usage information." >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "${OUTPUT_DIR_SET:-}" ]; then
+                OUTPUT_DIR="$1"
+                OUTPUT_DIR_SET=1
+                shift
+            else
+                EXTRA_ARGS+=("$1")
+                shift
+            fi
+            ;;
+    esac
+done
+
+# Ensure yt-dlp is available
+if ! command -v yt-dlp &> /dev/null; then
+    echo "Error: yt-dlp is required but not installed or not in PATH." >&2
+    exit 1
+fi
+
+# Ensure output directory exists
+mkdir -p "$OUTPUT_DIR"
+
+# Set archive file path if not custom
+if [ -z "$ARCHIVE_FILE" ]; then
+    ARCHIVE_FILE="$OUTPUT_DIR/.download_archive.txt"
+fi
+
+# Reset archive if requested
+if [ "$RESET_ARCHIVE" = true ] && [ -f "$ARCHIVE_FILE" ]; then
+    echo "Resetting archive file: $ARCHIVE_FILE"
+    rm -f "$ARCHIVE_FILE"
+fi
+
+# Check whether this is the first run (archive doesn't exist yet)
+# or a subsequent run (referencing existing archive)
+IS_FIRST_RUN=false
+BEFORE_COUNT=0
+
+if [ ! -f "$ARCHIVE_FILE" ]; then
+    IS_FIRST_RUN=true
+else
+    BEFORE_COUNT=$(wc -l < "$ARCHIVE_FILE" | tr -d ' ')
+fi
+
+# Resolve cookie argument
+COOKIES_ARG=()
+
+if [ -n "$COOKIES_FILE" ]; then
+    if [ -f "$COOKIES_FILE" ]; then
+        COOKIES_ARG=(--cookies "$COOKIES_FILE")
+    else
+        echo "Warning: Specified cookie file '$COOKIES_FILE' not found." >&2
+    fi
+elif [ -n "$BROWSER" ]; then
+    case "${BROWSER,,}" in
+        zen)
+            zen_prof=""
+            for db in "$HOME"/.config/zen/*/cookies.sqlite "$HOME"/.zen/*/cookies.sqlite; do
+                if [ -f "$db" ]; then
+                    zen_prof=$(dirname "$db")
+                    break
+                fi
+            done
+            if [ -n "$zen_prof" ]; then
+                COOKIES_ARG=(--cookies-from-browser "firefox:$zen_prof")
+            else
+                echo "Warning: Zen browser profile not found in ~/.config/zen." >&2
+                COOKIES_ARG=(--cookies-from-browser zen)
+            fi
+            ;;
+        *)
+            COOKIES_ARG=(--cookies-from-browser "$BROWSER")
+            ;;
+    esac
+else
+    # Auto-detect cookies
+    if [ -f "./cookies.txt" ]; then
+        COOKIES_ARG=(--cookies "./cookies.txt")
+    elif [ -f "$HOME/.config/yt-dlp/cookies.txt" ]; then
+        COOKIES_ARG=(--cookies "$HOME/.config/yt-dlp/cookies.txt")
+    else
+        zen_prof=""
+        for db in "$HOME"/.config/zen/*/cookies.sqlite "$HOME"/.zen/*/cookies.sqlite; do
+            if [ -f "$db" ]; then
+                zen_prof=$(dirname "$db")
+                break
+            fi
+        done
+        if [ -n "$zen_prof" ]; then
+            COOKIES_ARG=(--cookies-from-browser "firefox:$zen_prof")
+        elif [ -d "$HOME/.mozilla/firefox" ]; then
+            COOKIES_ARG=(--cookies-from-browser firefox)
+        elif [ -d "$HOME/.config/google-chrome" ]; then
+            COOKIES_ARG=(--cookies-from-browser chrome)
+        elif [ -d "$HOME/.config/BraveSoftware" ]; then
+            COOKIES_ARG=(--cookies-from-browser brave)
+        elif [ -d "$HOME/.config/chromium" ]; then
+            COOKIES_ARG=(--cookies-from-browser chromium)
+        fi
+    fi
+fi
+
+# Acquire lock to prevent overlapping runs when called from cron/systemd timer
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "Another instance of yt-dl-mus-liked is currently running. Exiting."
+    exit 0
+fi
+
+echo "=================================================="
+if [ "$IS_FIRST_RUN" = true ]; then
+    echo "YouTube Music Liked Playlist Sync [FIRST RUN]"
+    echo "Archive status: Archive does not exist yet."
+    echo "                Will be created at: '$ARCHIVE_FILE'"
+    echo "Mode:           Initial sync (downloading and archiving all tracks)"
+else
+    echo "YouTube Music Liked Playlist Sync [INCREMENTAL UPDATE]"
+    echo "Archive status: Found existing archive with $BEFORE_COUNT track(s)."
+    echo "                Referencing: '$ARCHIVE_FILE'"
+    echo "Mode:           Skipping previously recorded tracks; downloading new likes"
+fi
+echo "Target URL:     $PLAYLIST_URL"
+echo "Output Dir:     $OUTPUT_DIR"
+if [ ${#COOKIES_ARG[@]} -gt 0 ]; then
+    echo "Cookies:        ${COOKIES_ARG[*]}"
+else
+    echo "Cookies:        None detected (Liked playlist may fail if private)"
+fi
+echo "=================================================="
+
+# Build yt-dlp arguments
+YTDL_CMD=(
+    yt-dlp
+    -x
+    --audio-format mp3
+    --add-metadata
+    --embed-thumbnail
+    --ppa "EmbedThumbnail+ffmpeg_o:-c:v mjpeg -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\""
+    -o "$OUTPUT_DIR/%(title)s.%(ext)s"
+    --download-archive "$ARCHIVE_FILE"
+    --ignore-errors
+    --no-overwrites
+)
+
+# On the first run, do a full scan so the archive is completely populated.
+# On subsequent runs, allow fast sync (--break-on-existing) if requested.
+if [ "$FAST_MODE" = true ]; then
+    if [ "$IS_FIRST_RUN" = true ]; then
+        echo "Notice: Initial run detected. Performing full sync to create archive (ignoring --fast)."
+    else
+        YTDL_CMD+=(--break-on-existing)
+    fi
+fi
+
+if [ ${#COOKIES_ARG[@]} -gt 0 ]; then
+    YTDL_CMD+=("${COOKIES_ARG[@]}")
+fi
+
+if [ "$VERBOSE" = false ]; then
+    YTDL_CMD+=(--no-warnings)
+fi
+
+# Run yt-dlp
+set +e
+"${YTDL_CMD[@]}" "$PLAYLIST_URL" "${EXTRA_ARGS[@]}"
+exit_code=$?
+set -e
+
+# Calculate new songs downloaded
+AFTER_COUNT=0
+if [ -f "$ARCHIVE_FILE" ]; then
+    AFTER_COUNT=$(wc -l < "$ARCHIVE_FILE" | tr -d ' ')
+fi
+NEW_SONGS=$(( AFTER_COUNT - BEFORE_COUNT ))
+
+echo "=================================================="
+if [ $exit_code -eq 0 ]; then
+    if [ "$IS_FIRST_RUN" = true ]; then
+        if [ -f "$ARCHIVE_FILE" ] && [ "$AFTER_COUNT" -gt 0 ]; then
+            msg="Initial sync complete: Created archive with $AFTER_COUNT track(s) in '$OUTPUT_DIR'."
+        else
+            msg="Initial sync completed (0 tracks added to archive)."
+        fi
+        echo "$msg"
+        if [ "$NOTIFY" = true ] && command -v notify-send &> /dev/null && [ -n "${DISPLAY:-${WAYLAND_DISPLAY:-}}" ]; then
+            notify-send -a "yt-dl-mus-liked" -i "audio-x-generic" "YouTube Music Sync" "$msg"
+        fi
+    elif [ "$NEW_SONGS" -gt 0 ]; then
+        msg="Update complete: Downloaded $NEW_SONGS new song(s) ($AFTER_COUNT total in archive)."
+        echo "$msg"
+        if [ "$NOTIFY" = true ] && command -v notify-send &> /dev/null && [ -n "${DISPLAY:-${WAYLAND_DISPLAY:-}}" ]; then
+            notify-send -a "yt-dl-mus-liked" -i "audio-x-generic" "YouTube Music Sync" "$msg"
+        fi
+    else
+        echo "Liked Music is up to date. All tracks match archive (0 new downloads)."
+    fi
+else
+    echo "yt-dlp finished with exit code: $exit_code."
+    if [ "$NEW_SONGS" -gt 0 ]; then
+        echo "Archived $NEW_SONGS track(s) before stopping."
+    fi
+fi
+echo "=================================================="
+
+exit $exit_code
