@@ -3,6 +3,7 @@
 # yt-dl-mus-liked
 #
 # Periodically syncs/updates your "Liked Music" playlist from YouTube Music.
+# Compatible with Linux desktops and Android (Termux).
 # Based on yt-dl-mus.
 #
 # Default behavior:
@@ -13,6 +14,12 @@
 
 set -euo pipefail
 
+# Environment detection
+IS_ANDROID=false
+if [ -n "${TERMUX_VERSION:-}" ] || [ "$(uname -o 2>/dev/null || true)" = "Android" ] || [ -d "/data/data/com.termux" ]; then
+    IS_ANDROID=true
+fi
+
 # Default settings
 DEFAULT_PLAYLIST="https://music.youtube.com/playlist?list=LM"
 PLAYLIST_URL="${PLAYLIST_URL:-$DEFAULT_PLAYLIST}"
@@ -22,9 +29,11 @@ COOKIES_FILE="${COOKIES_FILE:-}"
 BROWSER="${BROWSER_NAME:-}"
 FAST_MODE=false
 RESET_ARCHIVE=false
+EXPORT_COOKIES=false
+EXPORT_PATH=""
 NOTIFY=true
 VERBOSE=false
-LOCK_FILE="/tmp/yt-dl-mus-liked.lock"
+LOCK_FILE="$HOME/.tmp/yt-dl-mus-liked.lock"
 EXTRA_ARGS=()
 
 show_help() {
@@ -50,12 +59,19 @@ Options:
   --reset-archive               Delete existing archive and perform a fresh initial sync
   -b, --browser NAME            Browser for cookies (zen, firefox, chrome, brave, etc.)
   -c, --cookies FILE            Path to cookies.txt file
+  --export-cookies [FILE]       Export cookies from desktop browser to a cookies.txt file
+                                (useful for syncing to your phone / Termux)
   -f, --fast                    Fast sync: stop checking when reaching the first
                                 previously downloaded song (--break-on-existing)
   -n, --dry-run, --simulate     Simulate sync without actually downloading files
   -q, --quiet                   Suppress desktop notifications and non-essential logs
   -v, --verbose                 Show verbose yt-dlp output
   -h, --help                    Show this help message
+
+Termux / Android Note:
+  On Android, browser apps are sandboxed and cannot be accessed directly by
+  Termux. Run 'yt-dl-mus-liked --export-cookies' on your desktop, and place the
+  resulting cookies.txt in your synced Music folder or ~/.config/yt-dlp/cookies.txt.
 
 Examples:
   # Initial sync / periodic update
@@ -64,11 +80,11 @@ Examples:
   # Fast periodic update (stops at first previously downloaded song)
   yt-dl-mus-liked --fast
 
-  # Specify a custom folder
-  yt-dl-mus-liked "$HOME/Music/Favorites"
+  # Export cookies for use on phone/Termux
+  yt-dl-mus-liked --export-cookies
 
-  # Dry run test
-  yt-dl-mus-liked --dry-run
+  # Specify a custom folder or cookie file
+  yt-dl-mus-liked -c ~/storage/shared/Music/cookies.txt
 EOF
 }
 
@@ -94,6 +110,15 @@ while [[ $# -gt 0 ]]; do
         --reset-archive)
             RESET_ARCHIVE=true
             shift
+            ;;
+        --export-cookies)
+            EXPORT_COOKIES=true
+            if [[ $# -gt 1 && ! "$2" =~ ^- ]]; then
+                EXPORT_PATH="$2"
+                shift 2
+            else
+                shift
+            fi
             ;;
         -b|--browser)
             BROWSER="$2"
@@ -151,28 +176,6 @@ fi
 # Ensure output directory exists
 mkdir -p "$OUTPUT_DIR"
 
-# Set archive file path if not custom
-if [ -z "$ARCHIVE_FILE" ]; then
-    ARCHIVE_FILE="$OUTPUT_DIR/.download_archive.txt"
-fi
-
-# Reset archive if requested
-if [ "$RESET_ARCHIVE" = true ] && [ -f "$ARCHIVE_FILE" ]; then
-    echo "Resetting archive file: $ARCHIVE_FILE"
-    rm -f "$ARCHIVE_FILE"
-fi
-
-# Check whether this is the first run (archive doesn't exist yet)
-# or a subsequent run (referencing existing archive)
-IS_FIRST_RUN=false
-BEFORE_COUNT=0
-
-if [ ! -f "$ARCHIVE_FILE" ]; then
-    IS_FIRST_RUN=true
-else
-    BEFORE_COUNT=$(wc -l < "$ARCHIVE_FILE" | tr -d ' ')
-fi
-
 # Resolve cookie argument
 COOKIES_ARG=()
 
@@ -180,7 +183,8 @@ if [ -n "$COOKIES_FILE" ]; then
     if [ -f "$COOKIES_FILE" ]; then
         COOKIES_ARG=(--cookies "$COOKIES_FILE")
     else
-        echo "Warning: Specified cookie file '$COOKIES_FILE' not found." >&2
+        echo "Error: Specified cookie file '$COOKIES_FILE' not found." >&2
+        exit 1
     fi
 elif [ -n "$BROWSER" ]; then
     case "${BROWSER,,}" in
@@ -205,11 +209,27 @@ elif [ -n "$BROWSER" ]; then
     esac
 else
     # Auto-detect cookies
-    if [ -f "./cookies.txt" ]; then
-        COOKIES_ARG=(--cookies "./cookies.txt")
-    elif [ -f "$HOME/.config/yt-dlp/cookies.txt" ]; then
-        COOKIES_ARG=(--cookies "$HOME/.config/yt-dlp/cookies.txt")
-    else
+    # 1. First check known cookie file locations (essential on Android / Termux)
+    candidate_cookie_files=(
+        "./cookies.txt"
+        "$HOME/.config/yt-dlp/cookies.txt"
+        "$OUTPUT_DIR/cookies.txt"
+        "$HOME/Music/cookies.txt"
+        "$HOME/storage/shared/Music/cookies.txt"
+        "$HOME/storage/downloads/cookies.txt"
+        "/sdcard/Download/cookies.txt"
+        "/sdcard/Music/cookies.txt"
+    )
+
+    for cf in "${candidate_cookie_files[@]}"; do
+        if [ -f "$cf" ]; then
+            COOKIES_ARG=(--cookies "$cf")
+            break
+        fi
+    done
+
+    # 2. If no cookie file found and not on Android, try desktop browser profiles
+    if [ ${#COOKIES_ARG[@]} -eq 0 ] && [ "$IS_ANDROID" = false ]; then
         zen_prof=""
         for db in "$HOME"/.config/zen/*/cookies.sqlite "$HOME"/.zen/*/cookies.sqlite; do
             if [ -f "$db" ]; then
@@ -229,6 +249,86 @@ else
             COOKIES_ARG=(--cookies-from-browser chromium)
         fi
     fi
+fi
+
+# Handle --export-cookies
+if [ "$EXPORT_COOKIES" = true ]; then
+    if [ ${#COOKIES_ARG[@]} -eq 0 ]; then
+        echo "Error: No browser cookies detected to export." >&2
+        exit 1
+    fi
+
+    if [ -z "$EXPORT_PATH" ]; then
+        EXPORT_PATH="$OUTPUT_DIR/cookies.txt"
+    fi
+
+    echo "Exporting YouTube cookies to: $EXPORT_PATH"
+    mkdir -p "$(dirname "$EXPORT_PATH")"
+
+    set +e
+    yt-dlp "${COOKIES_ARG[@]}" --cookies "$EXPORT_PATH" --simulate "https://music.youtube.com/playlist?list=LM" --playlist-items 0 > /dev/null 2>&1
+    export_status=$?
+    set -e
+
+    if [ $export_status -eq 0 ] && [ -f "$EXPORT_PATH" ]; then
+        cookie_count=$(grep -vc '^#' "$EXPORT_PATH" 2>/dev/null || echo 0)
+        echo "Success: Exported $cookie_count cookies to '$EXPORT_PATH'."
+        echo ""
+        echo "To use on your phone in Termux:"
+        echo "  - Copy '$EXPORT_PATH' to your phone (via Syncthing, USB, or scp)."
+        echo "  - Place it in your synced Music folder or ~/.config/yt-dlp/cookies.txt."
+        echo "  - yt-dl-mus-liked on Termux will auto-detect it."
+        exit 0
+    else
+        echo "Error: Failed to export cookies. Ensure you are logged into YouTube in your browser." >&2
+        exit 1
+    fi
+fi
+
+# Check for authentication issues on Android / Termux
+if [ ${#COOKIES_ARG[@]} -eq 0 ] && [ "$PLAYLIST_URL" = "$DEFAULT_PLAYLIST" ]; then
+    if [ "$IS_ANDROID" = true ]; then
+        echo "=================================================="
+        echo "Error: YouTube Authentication Required on Termux"
+        echo "=================================================="
+        echo "Your 'Liked Music' playlist is private to your account."
+        echo "On Android, Termux cannot read cookies from browser apps"
+        echo "like Firefox because Android sandboxes each app's data."
+        echo ""
+        echo "How to fix:"
+        echo "1. On your desktop, run:"
+        echo "   yt-dl-mus-liked --export-cookies"
+        echo ""
+        echo "2. Transfer the generated 'cookies.txt' to your phone (e.g. via Syncthing)"
+        echo "   and place it in one of these locations:"
+        echo "   - $OUTPUT_DIR/cookies.txt"
+        echo "   - $HOME/.config/yt-dlp/cookies.txt"
+        echo "   - ~/storage/shared/Music/cookies.txt"
+        echo "=================================================="
+        exit 1
+    fi
+fi
+
+# Set archive file path if not custom
+if [ -z "$ARCHIVE_FILE" ]; then
+    ARCHIVE_FILE="$OUTPUT_DIR/.download_archive.txt"
+fi
+
+# Reset archive if requested
+if [ "$RESET_ARCHIVE" = true ] && [ -f "$ARCHIVE_FILE" ]; then
+    echo "Resetting archive file: $ARCHIVE_FILE"
+    rm -f "$ARCHIVE_FILE"
+fi
+
+# Check whether this is the first run (archive doesn't exist yet)
+# or a subsequent run (referencing existing archive)
+IS_FIRST_RUN=false
+BEFORE_COUNT=0
+
+if [ ! -f "$ARCHIVE_FILE" ]; then
+    IS_FIRST_RUN=true
+else
+    BEFORE_COUNT=$(wc -l < "$ARCHIVE_FILE" | tr -d ' ')
 fi
 
 # Acquire lock to prevent overlapping runs when called from cron/systemd timer
